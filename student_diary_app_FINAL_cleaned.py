@@ -6,9 +6,8 @@ from datetime import datetime
 
 st.set_page_config(page_title="감정 일기장", page_icon="📘")
 
-# Streamlit Cloud secrets
+# 구글 인증
 credentials_dict = st.secrets["GOOGLE_CREDENTIALS"]
-
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
@@ -16,12 +15,12 @@ scope = [
 creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict, scope)
 client = gspread.authorize(creds)
 
-# Load student list
+# 학생 목록 불러오기
 student_list_ws = client.open("학생목록").sheet1
 students_df = pd.DataFrame(student_list_ws.get_all_records())
 
-# Initialize session state
-for key in ["logged_in", "page", "name", "sheet_url", "emotion", "gratitude", "message", "diary_offset"]:
+# 세션 상태 초기화
+for key in ["logged_in", "page", "name", "sheet_url", "emotion", "gratitude", "message"]:
     if key not in st.session_state:
         st.session_state[key] = 0 if key == "page" else None
 
@@ -93,7 +92,7 @@ elif st.session_state.page == 3:
     st.title("📘 감사한 일")
     st.session_state.gratitude = st.text_area("오늘 감사한 일은 무엇인가요?")
 
-    if st.button("다음 →", key="next2"):
+    if st.button("다음 →"):
         st.session_state.page = 4
         st.experimental_rerun()
 
@@ -129,7 +128,7 @@ elif st.session_state.page == 5:
         today = datetime.today().strftime("%Y-%m-%d")
         student_ws = client.open_by_url(st.session_state.sheet_url).sheet1
 
-        # 쪽지 자동 불러오기
+        # 선생님 쪽지 자동 불러오기
         try:
             data = student_ws.get_all_records()
             note_for_today = ""
@@ -178,7 +177,7 @@ elif st.session_state.page == "today_diary":
                 found = True
 
                 if st.button("❌ 오늘 일기 삭제하기"):
-                    student_ws.delete_rows(idx + 2)  # 1행: 헤더
+                    student_ws.delete_rows(idx + 2)
                     st.success("✅ 오늘의 일기를 삭제했어요.")
                     st.experimental_rerun()
                 break
@@ -192,4 +191,3 @@ elif st.session_state.page == "today_diary":
     if st.button("← 돌아가기"):
         st.session_state.page = 1
         st.experimental_rerun()
-
