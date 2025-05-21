@@ -1,4 +1,4 @@
-# 감정 일기장 (학생용) - 전체 코드 정리본 with 최신 쪽지 최적화
+# 감정 일기장 (학생용) - 전체 코드 정리본 with 최신 쪽지 확인 버튼 방식
 
 import streamlit as st
 import pandas as pd
@@ -111,32 +111,52 @@ elif st.session_state.student_logged_in:
         st.title(f"📬 {st.session_state.student_name}님, 선생님 쪽지 확인")
 
         if not st.session_state.student_checked_notes_button_clicked:
-            st.info("아래 '가장 최근 선생님 쪽지 확인하기 🔍' 버튼을 눌러보세요.")
+            if st.button("📬 선생님 쪽지 확인", use_container_width=True):
+                st.session_state.student_checked_notes_button_clicked = True
+                st.session_state.student_new_notes_to_display = []
+                try:
+                    ws = g_client.open_by_url(st.session_state.student_sheet_url).sheet1
+                    ensure_sheet_structure(ws, SETTINGS_ROW_DEFAULT, EXPECTED_STUDENT_SHEET_HEADER)
+                    all_vals = ws.get_all_values()
 
-        if st.button("가장 최근 선생님 쪽지 확인하기 🔍"):
-            st.session_state.student_checked_notes_button_clicked = True
-            st.session_state.student_new_notes_to_display = []
-            try:
-                ws = g_client.open_by_url(st.session_state.student_sheet_url).sheet1
-                ensure_sheet_structure(ws, SETTINGS_ROW_DEFAULT, EXPECTED_STUDENT_SHEET_HEADER)
-                all_vals = ws.get_all_values()
-                latest_note = None
-                for row in reversed(all_vals[2:]):
-                    if len(row) >= 5 and row[4].strip():
-                        latest_note = {"날짜": row[0], "쪽지": row[4].strip()}; break
-                if latest_note:
-                    st.session_state.student_new_notes_to_display = [latest_note]
-            except Exception as e:
-                st.error(f"쪽지 확인 오류: {e}")
-                st.session_state.student_checked_notes_button_clicked = False
+                    # B1에 있는 마지막 확인 날짜 확인
+                    last_checked_date = "2000-01-01"
+                    try:
+                        b1_val = ws.cell(1, 2).value
+                        if b1_val:
+                            last_checked_date = b1_val.strip()
+                    except:
+                        pass
+
+                    new_notes = []
+                    for row in reversed(all_vals[2:]):
+                        if len(row) >= 5 and row[4].strip():
+                            try:
+                                note_date = datetime.strptime(row[0], "%Y-%m-%d").date()
+                                if note_date > datetime.strptime(last_checked_date, "%Y-%m-%d").date():
+                                    new_notes.append({"날짜": row[0], "쪽지": row[4].strip()})
+                            except:
+                                continue
+
+                    if new_notes:
+                        st.session_state.student_new_notes_to_display = sorted(new_notes, key=lambda x: x["날짜"])
+                        latest_date = st.session_state.student_new_notes_to_display[-1]["날짜"]
+                        try:
+                            ws.update_cell(1, 2, latest_date)
+                        except:
+                            pass
+                except Exception as e:
+                    st.error(f"쪽지 확인 오류: {e}")
+                    st.session_state.student_checked_notes_button_clicked = False
 
         if st.session_state.student_checked_notes_button_clicked:
             notes = st.session_state.student_new_notes_to_display
             if notes:
-                st.success("가장 최근 쪽지를 확인했어요!")
-                st.markdown(f"**{notes[0]['날짜']}**: {notes[0]['쪽지']}")
+                st.success(f"새로운 쪽지가 {len(notes)}개 도착했어요!")
+                for note in notes:
+                    st.markdown(f"**{note['날짜']}**: {note['쪽지']}")
             else:
-                st.info("선생님이 아직 쪽지를 남기지 않으셨어요.")
+                st.info("새로운 선생님 쪽지가 없습니다.")
 
         st.divider()
         col1, col2 = st.columns(2)
@@ -147,6 +167,7 @@ elif st.session_state.student_logged_in:
             if st.button("로그아웃", use_container_width=True):
                 logout()
 
+    # --- 메뉴 페이지 ---
     elif st.session_state.student_page == "menu":
         st.title(f"📘 {st.session_state.student_name}님 감정일기")
         st.divider()
@@ -159,6 +180,7 @@ elif st.session_state.student_logged_in:
         if st.button("로그아웃", use_container_width=True):
             logout()
 
+    # --- 감정 선택 페이지 ---
     elif st.session_state.student_page == "write_emotion":
         st.title("😊 오늘의 감정")
         emo_groups = {"😀 긍정": ["기쁨", "감사", "자신감", "설렘", "평온"], "😐 보통": ["그냥 그래요", "지루함"], "😢 부정": ["슬픔", "불안", "짜증"]}
@@ -168,12 +190,14 @@ elif st.session_state.student_logged_in:
         if st.button("다음 →", use_container_width=True):
             go_to("write_gratitude")
 
+    # --- 감사한 일 작성 페이지 ---
     elif st.session_state.student_page == "write_gratitude":
         st.title("🙏 감사한 일")
         st.session_state.student_gratitude = st.text_area("감사한 일", value=st.session_state.student_gratitude)
         if st.button("다음 →", use_container_width=True):
             go_to("write_message")
 
+    # --- 하고 싶은 말 작성 페이지 ---
     elif st.session_state.student_page == "write_message":
         st.title("💬 하고 싶은 말")
         st.session_state.student_message = st.text_area("하고 싶은 말", value=st.session_state.student_message)
@@ -196,6 +220,7 @@ elif st.session_state.student_logged_in:
             except Exception as e:
                 st.error(f"저장 중 오류: {e}")
 
+    # --- 지난 일기 보기/삭제 페이지 ---
     elif st.session_state.student_page == "view_modify":
         st.title("📖 지난 일기 보기/삭제")
         df = load_entries()
