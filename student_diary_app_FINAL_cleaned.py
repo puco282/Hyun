@@ -1,5 +1,3 @@
-# 감정 일기장 (학생용) - 전체 코드 정리본 with 최신 쪽지 확인 버튼 방식
-
 import streamlit as st
 import pandas as pd
 import gspread
@@ -9,234 +7,379 @@ from datetime import datetime
 # --- 페이지 기본 설정 ---
 st.set_page_config(page_title="감정 일기장 (학생용)", page_icon="📘", layout="centered")
 
-# --- 예상 시트 헤더 ---
+# --- 학생 시트 예상 헤더 ---
 EXPECTED_STUDENT_SHEET_HEADER = ["날짜", "감정", "감사한 일", "하고 싶은 말", "선생님 쪽지"]
-SETTINGS_ROW_DEFAULT = ["설정", "2000-01-01"]
+SETTINGS_ROW_DEFAULT = ["설정", "2000-01-01"] 
 
-# --- 인증 및 데이터 로딩 ---
-@st.cache_resource
-def authorize_gspread():
-    credentials = st.secrets["GOOGLE_CREDENTIALS"]
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(credentials, scope)
-    return gspread.authorize(creds)
-
-@st.cache_data(ttl=600)
-def get_students_df(client):
+# --- Helper Functions (이전과 동일) ---
+@st.cache_resource 
+def authorize_gspread_student_final_v6():
     try:
-        ws = client.open("학생목록").sheet1
-        df = pd.DataFrame(ws.get_all_records(head=1))
-        for col in ["이름", "비밀번호", "시트URL"]:
-            if col not in df.columns:
-                st.error(f"'학생목록' 시트에 '{col}' 열이 없습니다."); return pd.DataFrame()
-        return df
-    except:
-        st.error("학생 목록 로딩 실패"); return pd.DataFrame()
+        credentials_dict_student_final_v6 = st.secrets["GOOGLE_CREDENTIALS"]
+        scope_student_final_v6 = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds_student_final_v6 = ServiceAccountCredentials.from_json_keyfile_dict(credentials_dict_student_final_v6, scope_student_final_v6)
+        return gspread.authorize(creds_student_final_v6)
+    except Exception as e: st.error(f"Google API 인증 오류(학생앱): {e}. secrets 설정을 확인하세요."); st.stop(); return None
 
-# --- 시트 구조 보장 ---
-def ensure_sheet_structure(ws, settings_row, header_row):
-    all_vals = ws.get_all_values()
-    if not all_vals:
-        ws.append_row(settings_row, value_input_option='USER_ENTERED')
-        ws.append_row(header_row, value_input_option='USER_ENTERED')
-        return
-    if len(all_vals) < 2:
-        ws.append_row(header_row, value_input_option='USER_ENTERED')
+@st.cache_data(ttl=600) 
+def get_students_df_for_student_app_v6(_client_gspread_student):
+    if not _client_gspread_student: return pd.DataFrame()
+    try:
+        ws = _client_gspread_student.open("학생목록").sheet1
+        df = pd.DataFrame(ws.get_all_records(head=1)) 
+        if not df.empty:
+            req_cols = ["이름", "비밀번호", "시트URL"]
+            for col in req_cols:
+                if col not in df.columns: st.error(f"'학생목록'에 '{col}' 열 없음."); return pd.DataFrame()
+        return df
+    except gspread.exceptions.SpreadsheetNotFound: st.error("'학생목록' 시트 없음."); return pd.DataFrame()
+    except Exception as e: st.error(f"학생 목록 로딩 오류(학생앱): {e}"); return pd.DataFrame()
+
+def get_records_from_row2_header_s_app_v6(worksheet_s, expected_headers):
+    all_values = worksheet_s.get_all_values()
+    if len(all_values) < 2: return [] 
+    data_rows = all_values[2:]; records = []
+    for r_vals in data_rows:
+        rec = {}
+        for i, header in enumerate(expected_headers): rec[header] = r_vals[i] if i < len(r_vals) else None
+        records.append(rec)
+    return records
+
+def ensure_sheet_structure_s_app_v6(ws, settings_c, header_c): # 변수명 간소화
+    try:
+        all_vals = ws.get_all_values()
+        if not all_vals: ws.append_rows([settings_c, header_c], value_input_option='USER_ENTERED'); return
+        r1 = all_vals[0]
+        if len(r1) < 1 or r1[0] != settings_c[0]: ws.update_cell(1, 1, settings_c[0])
+        if len(r1) < 2 or not r1[1]: ws.update_cell(1, 2, settings_c[1])
+        if len(all_vals) < 2: ws.append_row(header_c, value_input_option='USER_ENTERED')
+        elif list(all_vals[1]) != header_c:
+            try:
+                end_col = chr(ord('A') + len(header_c) - 1)
+                ws.update(f'A2:{end_col}2', [header_c], value_input_option='USER_ENTERED')
+            except Exception: pass 
+    except Exception: pass
 
 # --- 세션 상태 초기화 ---
-def init_session():
-    defaults = {
-        "student_logged_in": False, "student_page": "login", "student_name": None,
-        "student_sheet_url": None, "student_checked_notes_button_clicked": False,
-        "student_new_notes_to_display": [], "student_entries": None,
-        "student_emotion": None, "student_gratitude": "", "student_message": ""
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+default_session_states_s_app_v6 = {
+    "student_logged_in": False, "student_page": "login", "student_name": None, 
+    "student_sheet_url": None, "student_emotion": None, "student_gratitude": "", 
+    "student_message": "", "student_selected_diary_date": None,
+    "student_navigation_history": [], 
+    "student_all_entries_cache": None, 
+    "student_new_notes_to_display": [], 
+    "notes_check_outcome": None # ★★★ "check_notes" 페이지의 결과 상태: None, "NOTES_FOUND", "NO_NEW_NOTES", "ERROR"
+}
+for key_s_v6, val_s_v6 in default_session_states_s_app_v6.items():
+    if key_s_v6 not in st.session_state: st.session_state[key_s_v6] = val_s_v6
 
-init_session()
+# --- 네비게이션 함수 (스택 활용) ---
+def student_go_to_page_nav_v6(target_page_nav_s, **kwargs_nav): # kwargs로 추가 상태 전달
+    current_page_nav_s_v6 = st.session_state.student_page
+    if current_page_nav_s_v6 != target_page_nav_s:
+        if current_page_nav_s_v6 != "login": 
+            if not st.session_state.student_navigation_history or st.session_state.student_navigation_history[-1] != current_page_nav_s_v6:
+                st.session_state.student_navigation_history.append(current_page_nav_s_v6)
+    
+    for key_nav, value_nav in kwargs_nav.items(): # 페이지 이동 시 전달된 추가 상태들 설정
+        st.session_state[key_nav] = value_nav
 
-# --- 네비게이션 ---
-def go_to(page, **kwargs):
-    st.session_state.student_page = page
-    for k, v in kwargs.items():
-        st.session_state[k] = v
+    st.session_state.student_page = target_page_nav_s
     st.rerun()
 
-def logout():
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    init_session()
+def student_go_back_page_nav_v6():
+    # 뒤로 갈 때도 "check_notes" 페이지 관련 상태 초기화
+    st.session_state.notes_check_outcome = None 
+    st.session_state.student_new_notes_to_display = []
+
+    if st.session_state.student_navigation_history:
+        st.session_state.student_page = st.session_state.student_navigation_history.pop()
+    else:
+        st.session_state.student_page = "menu" 
     st.rerun()
 
-# --- 인증 및 데이터 ---
-g_client = authorize_gspread()
-students_df = get_students_df(g_client)
+def student_logout_nav_v6():
+    for key_to_reset_nav_s_v6 in default_session_states_s_app_v6.keys():
+        st.session_state[key_to_reset_nav_s_v6] = default_session_states_s_app_v6[key_to_reset_nav_s_v6]
+    st.rerun()
 
-# --- 로그인 페이지 ---
+# --- 학생 데이터 로드 및 캐시 함수 ---
+def load_student_all_entries_cached_v6(g_client_s_app_v6, sheet_url_s_app_v6):
+    if isinstance(st.session_state.student_all_entries_cache, pd.DataFrame):
+        return st.session_state.student_all_entries_cache
+    try:
+        with st.spinner("일기 데이터 로딩 중... (API 호출)"):
+            ws_s_load_app_v6 = g_client_s_app_v6.open_by_url(sheet_url_s_app_v6).sheet1
+            ensure_sheet_structure_s_app_v6(ws_s_load_app_v6, SETTINGS_ROW_DEFAULT, EXPECTED_STUDENT_SHEET_HEADER)
+            records_s_load_app_v6 = get_records_from_row2_header_s_app_v6(ws_s_load_app_v6, EXPECTED_STUDENT_SHEET_HEADER)
+            df_s_load_app_v6 = pd.DataFrame(records_s_load_app_v6)
+            st.session_state.student_all_entries_cache = df_s_load_app_v6
+            return df_s_load_app_v6
+    except Exception as e_load_s_app_v6:
+        st.error(f"학생 일기 데이터 로드 오류: {e_load_s_app_v6}"); return pd.DataFrame()
+
+# --- MAIN STUDENT APP ---
+g_client_student_main_v6 = authorize_gspread_student_final_v6()
+students_df_login_v6 = get_students_df_for_student_app_v6(g_client_student_main_v6)
+
 if st.session_state.student_page == "login":
     st.title("👧 감정 일기 로그인")
-    name = st.text_input("이름")
-    pw = st.text_input("비밀번호 (6자리)", type="password", max_chars=6)
+    s_name_in_v6 = st.text_input("이름", key="s_login_name_vfinal_6")
+    s_pw_in_v6 = st.text_input("비밀번호 (6자리)", type="password", max_chars=6, key="s_login_pw_vfinal_6")
 
-    if st.button("로그인"):
-        record = students_df[students_df["이름"] == name.strip()]
-        if not record.empty and str(record.iloc[0]["비밀번호"]).strip() == pw.strip():
-            st.session_state.student_logged_in = True
-            st.session_state.student_name = name.strip()
-            st.session_state.student_sheet_url = record.iloc[0]["시트URL"]
-            go_to("check_notes", student_checked_notes_button_clicked=False, student_new_notes_to_display=[])
+    if st.button("로그인", key="s_login_btn_vfinal_6"):
+        s_name_login_v6, s_pw_login_v6 = s_name_in_v6.strip(), s_pw_in_v6.strip()
+        if not s_name_login_v6 or not s_pw_login_v6: st.warning("이름과 비밀번호를 모두 입력하세요.")
         else:
-            st.error("이름 또는 비밀번호가 틀립니다.")
+            if students_df_login_v6.empty and g_client_student_main_v6:
+                 st.error("'학생목록' 시트가 비었거나 접근할 수 없습니다. 관리자에게 문의하세요.")
+            elif students_df_login_v6.empty and not g_client_student_main_v6: 
+                 st.error("Google API 인증에 실패했습니다. secrets 설정을 확인하거나 관리자에게 문의하세요.")
+            else:
+                s_record_v6 = students_df_login_v6[students_df_login_v6["이름"] == s_name_login_v6]
+                if not s_record_v6.empty and str(s_record_v6.iloc[0]["비밀번호"]).strip() == s_pw_login_v6:
+                    for key_s_reset_v6, val_s_reset_v6 in default_session_states_s_app_v6.items():
+                        st.session_state[key_s_reset_v6] = val_s_reset_v6
+                    st.session_state.student_logged_in = True
+                    st.session_state.student_name = s_name_login_v6
+                    st.session_state.student_sheet_url = s_record_v6.iloc[0]["시트URL"]
+                    # 로그인 후 'check_notes'로 이동하면서 관련 상태 초기화
+                    student_go_to_page_nav_v6("check_notes", 
+                                              notes_check_outcome=None, 
+                                              student_new_notes_to_display=[])
+                else: st.error("이름 또는 비밀번호가 틀립니다.")
 
-# --- 로그인 후 페이지들 ---
 elif st.session_state.student_logged_in:
-
-    def load_entries():
-        try:
-            if st.session_state.student_entries is not None:
-                return st.session_state.student_entries
-            ws = g_client.open_by_url(st.session_state.student_sheet_url).sheet1
-            ensure_sheet_structure(ws, SETTINGS_ROW_DEFAULT, EXPECTED_STUDENT_SHEET_HEADER)
-            data = ws.get_all_values()[2:]
-            entries = [dict(zip(EXPECTED_STUDENT_SHEET_HEADER, row + [""] * (5 - len(row)))) for row in data]
-            df = pd.DataFrame(entries)
-            st.session_state.student_entries = df
-            return df
-        except:
-            return pd.DataFrame()
+    df_student_entries_main_v6 = load_student_all_entries_cached_v6(g_client_student_main_v6, st.session_state.student_sheet_url)
 
     if st.session_state.student_page == "check_notes":
         st.title(f"📬 {st.session_state.student_name}님, 선생님 쪽지 확인")
-
-        if st.button("📬 선생님 쪽지 확인", use_container_width=True):
-            try:
-                ws = g_client.open_by_url(st.session_state.student_sheet_url).sheet1
-                ensure_sheet_structure(ws, SETTINGS_ROW_DEFAULT, EXPECTED_STUDENT_SHEET_HEADER)
-                all_vals = ws.get_all_values()
-
-                # B1에 있는 마지막 확인 날짜 확인
-                last_checked_date = "2000-01-01"
+        
+        if st.button("새로운 선생님 쪽지 확인하기 🔍", key="s_check_new_notes_btn_vfinal_6"):
+            new_notes_this_check = [] 
+            with st.spinner("새로운 쪽지를 확인하는 중입니다... (API 호출 중)"):
                 try:
-                    b1_val = ws.cell(1, 2).value
-                    if b1_val:
-                        last_checked_date = b1_val.strip()
-                except:
-                    pass
+                    student_sheet_url_notes_v6 = st.session_state.student_sheet_url
+                    if not student_sheet_url_notes_v6:
+                        st.error("학생 시트 정보를 찾을 수 없습니다."); st.stop()
 
-                new_notes = []
-                for row in reversed(all_vals[2:]):
-                    if len(row) >= 5 and row[4].strip():
-                        try:
-                            note_date = datetime.strptime(row[0], "%Y-%m-%d").date()
-                            if note_date > datetime.strptime(last_checked_date, "%Y-%m-%d").date():
-                                new_notes.append({"날짜": row[0], "쪽지": row[4].strip()})
-                        except:
-                            continue
-
-                if new_notes:
-                    new_notes = sorted(new_notes, key=lambda x: x["날짜"])
-                    st.success(f"새로운 쪽지가 {len(new_notes)}개 도착했어요!")
-                    for note in new_notes:
-                        st.markdown(f"**{note['날짜']}**: {note['쪽지']}")
+                    ws_notes_v6 = g_client_student_main_v6.open_by_url(student_sheet_url_notes_v6).sheet1
+                    ensure_sheet_structure_s_app_v6(ws_notes_v6, SETTINGS_ROW_DEFAULT, EXPECTED_STUDENT_SHEET_HEADER)
+                    
+                    last_checked_date_str_v6 = "2000-01-01"
                     try:
-                        ws.update_cell(1, 2, new_notes[-1]["날짜"])
-                    except:
-                        pass
-                else:
-                    st.info("새로운 선생님 쪽지가 없습니다.")
+                        b1_val_v6 = ws_notes_v6.cell(1, 2).value
+                        if b1_val_v6: last_checked_date_str_v6 = b1_val_v6
+                    except Exception: pass 
+                    
+                    if not df_student_entries_main_v6.empty:
+                        try: last_checked_dt_v6 = datetime.strptime(last_checked_date_str_v6, "%Y-%m-%d").date()
+                        except ValueError: last_checked_dt_v6 = datetime.strptime("2000-01-01", "%Y-%m-%d").date()
 
-            except Exception as e:
-                st.error(f"쪽지 확인 오류: {e}")
+                        for _, row_n_v6 in df_student_entries_main_v6.iterrows():
+                            date_n_v6, note_n_v6 = row_n_v6.get("날짜"), str(row_n_v6.get("선생님 쪽지", "")).strip()
+                            if note_n_v6 and date_n_v6:
+                                try:
+                                    if datetime.strptime(date_n_v6, "%Y-%m-%d").date() > last_checked_dt_v6:
+                                        new_notes_this_check.append((date_n_v6, note_n_v6))
+                                except ValueError: continue                         
+                        
+                        update_b1_date_v6 = datetime.today().strftime("%Y-%m-%d")
+                        if new_notes_this_check: update_b1_date_v6 = new_notes_this_check[-1][0] # 가장 최근 새 쪽지 날짜로 B1 업데이트
+                        
+                        try: ws_notes_v6.update_cell(1, 2, update_b1_date_v6)
+                        except Exception as e_b1: st.warning(f"확인 날짜 업데이트 실패: {e_b1}")
+                    else: st.warning("일기 데이터가 없습니다.")
 
+                    # 버튼 클릭 결과 세션 상태에 저장
+                    if new_notes_this_check:
+                        st.session_state.student_new_notes_to_display = sorted(new_notes_this_check, key=lambda x: x[0])
+                        st.session_state.notes_check_outcome = "NOTES_FOUND"
+                    else:
+                        st.session_state.student_new_notes_to_display = []
+                        st.session_state.notes_check_outcome = "NO_NEW_NOTES"
+
+                except gspread.exceptions.APIError as e_api_s_notes_v6:
+                    st.error(f"Google API 오류로 쪽지 확인 실패 (코드: {e_api_s_notes_v6.response.status_code}).")
+                    st.session_state.notes_check_outcome = "ERROR"
+                except Exception as e_s_notes_final_v6:
+                    st.error(f"쪽지 확인 중 오류: {e_s_notes_final_v6}")
+                    st.session_state.notes_check_outcome = "ERROR"
+            st.rerun() # 버튼 클릭 후 결과를 반영하기 위해 rerun
+
+        # --- 쪽지 확인 결과 또는 초기 안내 메시지 표시 ---
+        if st.session_state.notes_check_outcome == "NOTES_FOUND":
+            st.success(f"새로운 쪽지가 {len(st.session_state.student_new_notes_to_display)}개 도착했어요!")
+            for date_display_final_v6, note_display_final_v6 in st.session_state.student_new_notes_to_display:
+                st.markdown(f"**{date_display_final_v6}**: {note_display_final_v6}")
+        elif st.session_state.notes_check_outcome == "NO_NEW_NOTES":
+            st.info("새로운 선생님 쪽지가 없습니다.")
+        elif st.session_state.notes_check_outcome == "ERROR":
+            st.warning("쪽지를 확인하는 중 오류가 발생했습니다. 다시 시도해주세요.")
+        else: # outcome is None (페이지 첫 로드, 아직 버튼 안 누름)
+            st.info("위의 '새로운 선생님 쪽지 확인하기 🔍' 버튼을 눌러 새 쪽지가 있는지 확인해보세요.")
+        
         st.divider()
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("메인 메뉴", use_container_width=True):
-                go_to("menu", student_checked_notes_button_clicked=False, student_new_notes_to_display=[])
-        with col2:
-            if st.button("로그아웃", use_container_width=True):
-                logout()
+        s_notes_cols1_v6, s_notes_cols2_v6 = st.columns(2)
+        with s_notes_cols1_v6:
+            if st.button("메인 메뉴", key="s_notes_to_menu_vfinal_6", use_container_width=True):
+                student_go_to_page_nav_v6("menu", notes_check_outcome=None, student_new_notes_to_display=[])
+        with s_notes_cols2_v6:
+            if st.button("로그아웃", key="s_logout_notes_vfinal_6", use_container_width=True): student_logout_nav_v6()
 
-    # --- 메뉴 페이지 ---
     elif st.session_state.student_page == "menu":
-        st.title(f"📘 {st.session_state.student_name}님 감정일기")
-        st.divider()
-        if st.button("✏️ 오늘 일기 쓰기/수정", use_container_width=True):
-            go_to("write_emotion")
-        if st.button("📖 지난 일기 보기/삭제", use_container_width=True):
-            go_to("view_modify")
-        if st.button("📬 선생님 쪽지 다시 확인", use_container_width=True):
-            go_to("check_notes", student_checked_notes_button_clicked=False, student_new_notes_to_display=[])
-        if st.button("로그아웃", use_container_width=True):
-            logout()
+        st.title(f"📘 {st.session_state.student_name}님 감정일기"); st.divider()
+        if st.button("✏️ 오늘 일기 쓰기/수정", type="primary", use_container_width=True, key="s_menu_write_v6"):
+            today_s_menu_v6 = datetime.today().strftime("%Y-%m-%d")
+            st.session_state.student_emotion, st.session_state.student_gratitude, st.session_state.student_message = None, "", ""
+            if not df_student_entries_main_v6.empty:
+                today_entry_menu_v6 = df_student_entries_main_v6[df_student_entries_main_v6["날짜"] == today_s_menu_v6]
+                if not today_entry_menu_v6.empty:
+                    r_menu_v6 = today_entry_menu_v6.iloc[0]
+                    st.session_state.student_emotion = r_menu_v6.get("감정")
+                    st.session_state.student_gratitude = r_menu_v6.get("감사한 일", "")
+                    st.session_state.student_message = r_menu_v6.get("하고 싶은 말", "")
+            student_go_to_page_nav_v6("write_emotion")
+        
+        if st.button("지난 일기 보기/삭제", use_container_width=True, key="s_menu_view_v6"):
+            student_go_to_page_nav_v6("view_modify_diary", student_selected_diary_date=None) # kwargs로 상태 전달
+        if st.button("새로운 선생님 쪽지 확인", use_container_width=True, key="s_menu_notes_v6"):
+            student_go_to_page_nav_v6("check_notes", notes_check_outcome=None, student_new_notes_to_display=[])
+        if st.button("로그아웃", use_container_width=True, key="s_logout_menu_v6"): student_logout_nav_v6()
+    
+    # --- 이하 write_emotion, write_gratitude, write_message, confirm_submission, view_modify_diary 페이지 ---
+    # 이 부분은 이전 버전과 로직이 거의 동일합니다. 네비게이션 함수 호출과, 
+    # df_student_entries_main_v6 (캐시된 전체 학생 데이터)를 사용하는 부분만 주의깊게 보시면 됩니다.
+    # 코드가 너무 길어져 반복을 피하기 위해 핵심 수정 부분 위주로 포함했습니다.
+    # 이전 최종 코드에서 이 페이지들의 상세 로직을 가져와 student_go_to_page_nav_v6, student_go_back_page_nav_v6 함수를 사용하도록
+    # 수정하고, df_student_entries_main_v6를 활용하도록 하시면 됩니다.
 
-    # --- 감정 선택 페이지 ---
+    # 예시: write_emotion 페이지 (나머지 페이지도 유사하게 네비게이션 함수 사용)
     elif st.session_state.student_page == "write_emotion":
-        st.title("😊 오늘의 감정")
-        emo_groups = {"😀 긍정": ["기쁨", "감사", "자신감", "설렘", "평온"], "😐 보통": ["그냥 그래요", "지루함"], "😢 부정": ["슬픔", "불안", "짜증"]}
-        group = st.selectbox("감정 그룹", list(emo_groups.keys()))
-        detail = st.selectbox("감정", emo_groups[group])
-        st.session_state.student_emotion = f"{group} - {detail}"
-        if st.button("다음 →", use_container_width=True):
-            go_to("write_gratitude")
+        st.title("😊 오늘의 감정"); st.caption("오늘 어떤 감정을 느꼈나요?")
+        emo_dict_s_v6 = { "😀 긍정": ["기쁨", "감사", "자신감", "설렘", "평온"], "😐 보통": ["그냥 그래요", "지루함", "무난함"], "😢 부정": ["슬픔", "불안", "짜증", "화남", "피곤"] }
+        cur_g_v6, cur_d_v6 = None, None
+        if st.session_state.student_emotion:
+            try: 
+                g_v6, d_v6 = st.session_state.student_emotion.split(" - ",1)
+                if g_v6 in emo_dict_s_v6 and d_v6 in emo_dict_s_v6[g_v6]: cur_g_v6, cur_d_v6 = g_v6, d_v6
+            except ValueError: pass
+        sel_g_v6 = st.selectbox("감정 그룹", list(emo_dict_s_v6.keys()), index=list(emo_dict_s_v6.keys()).index(cur_g_v6) if cur_g_v6 else 0, key="s_emo_g_vfinal_6")
+        sel_d_v6 = st.selectbox("구체적 감정", emo_dict_s_v6[sel_g_v6], index=emo_dict_s_v6[sel_g_v6].index(cur_d_v6) if cur_d_v6 and cur_g_v6 == sel_g_v6 else 0, key="s_emo_d_vfinal_6")
+        st.session_state.student_emotion = f"{sel_g_v6} - {sel_d_v6}"
+        b1_we_v6,b2_we_v6 = st.columns(2)
+        with b1_we_v6:
+             if st.button("← 이전", key="s_emo_b_vfinal_6", use_container_width=True): student_go_back_page_nav_v6()
+        with b2_we_v6:
+            if st.button("다음 →", key="s_emo_n_vfinal_6", use_container_width=True, type="primary"): student_go_to_page_nav_v6("write_gratitude")
 
-    # --- 감사한 일 작성 페이지 ---
     elif st.session_state.student_page == "write_gratitude":
-        st.title("🙏 감사한 일")
-        st.session_state.student_gratitude = st.text_area("감사한 일", value=st.session_state.student_gratitude)
-        if st.button("다음 →", use_container_width=True):
-            go_to("write_message")
+        st.title("🙏 감사한 일"); st.caption("오늘 어떤 점이 감사했나요?")
+        st.session_state.student_gratitude = st.text_area("감사한 일", height=150, value=st.session_state.student_gratitude, key="s_grat_txt_vfinal_6", placeholder="사소한 것이라도 좋아요!")
+        b1_wg_v6,b2_wg_v6 = st.columns(2)
+        with b1_wg_v6:
+            if st.button("← 이전", key="s_grat_b_vfinal_6", use_container_width=True): student_go_back_page_nav_v6()
+        with b2_wg_v6:
+            if st.button("다음 →", key="s_grat_n_vfinal_6", use_container_width=True, type="primary"): student_go_to_page_nav_v6("write_message")
 
-    # --- 하고 싶은 말 작성 페이지 ---
     elif st.session_state.student_page == "write_message":
-        st.title("💬 하고 싶은 말")
-        st.session_state.student_message = st.text_area("하고 싶은 말", value=st.session_state.student_message)
-        if st.button("제출하기 ✅", use_container_width=True):
-            try:
-                ws = g_client.open_by_url(st.session_state.student_sheet_url).sheet1
-                today = datetime.today().strftime("%Y-%m-%d")
-                new_data = [today, st.session_state.student_emotion, st.session_state.student_gratitude, st.session_state.student_message, ""]
-                rows = ws.get_all_values()[2:]
-                updated = False
-                for i, row in enumerate(rows):
-                    if row[0] == today:
-                        ws.update(f"A{i+3}:E{i+3}", [new_data], value_input_option="USER_ENTERED")
-                        updated = True; break
-                if not updated:
-                    ws.append_row(new_data, value_input_option="USER_ENTERED")
-                st.success("일기 저장 완료!")
-                st.session_state.student_entries = None
-                go_to("menu")
-            except Exception as e:
-                st.error(f"저장 중 오류: {e}")
+        st.title("💬 하고 싶은 말"); st.caption("선생님이나 친구, 또는 자신에게 하고 싶은 말을 자유롭게 적어보세요.")
+        st.session_state.student_message = st.text_area("하고 싶은 말", height=200, value=st.session_state.student_message, key="s_msg_txt_vfinal_6", placeholder="어떤 이야기든 괜찮아요.")
+        b1_wm_v6,b2_wm_v6 = st.columns(2)
+        with b1_wm_v6:
+            if st.button("← 이전", key="s_msg_b_vfinal_6", use_container_width=True): student_go_back_page_nav_v6()
+        with b2_wm_v6:
+            if st.button("다음 →", key="s_msg_n_vfinal_6", use_container_width=True, type="primary"): student_go_to_page_nav_v6("confirm_submission")
 
-    # --- 지난 일기 보기/삭제 페이지 ---
-    elif st.session_state.student_page == "view_modify":
-        st.title("📖 지난 일기 보기/삭제")
-        df = load_entries()
-        if df.empty:
-            st.info("작성된 일기가 없습니다.")
-        else:
-            date = st.selectbox("날짜 선택", options=sorted(df["날짜"], reverse=True))
-            sel = df[df["날짜"] == date].iloc[0]
-            st.markdown(f"**감정**: {sel['감정']}")
-            st.markdown(f"**감사한 일**: {sel['감사한 일']}")
-            st.markdown(f"**하고 싶은 말**: {sel['하고 싶은 말']}")
-            st.markdown(f"**선생님 쪽지**: {sel['선생님 쪽지']}")
-            if st.button("❌ 삭제", type="primary"):
+    elif st.session_state.student_page == "confirm_submission":
+        st.title("✅ 내용 확인"); st.divider()
+        st.write(f"**감정:** {st.session_state.student_emotion or '(선택 안 함)'}")
+        st.write(f"**감사한 일:** {st.session_state.student_gratitude or '(내용 없음)'}")
+        st.write(f"**하고 싶은 말:** {st.session_state.student_message or '(내용 없음)'}")
+        st.divider()
+        b1_cs_v6,b2_cs_v6 = st.columns(2)
+        with b1_cs_v6:
+            if st.button("← 수정하기", key="s_conf_b_vfinal_6", use_container_width=True): student_go_back_page_nav_v6()
+        with b2_cs_v6:
+            if st.button("✔️ 제출하기", key="s_submit_diary_vfinal_6", use_container_width=True, type="primary"):
+                today_submit_s_v6 = datetime.today().strftime("%Y-%m-%d")
                 try:
-                    ws = g_client.open_by_url(st.session_state.student_sheet_url).sheet1
-                    rows = ws.get_all_values()[2:]
-                    for i, row in enumerate(rows):
-                        if row[0] == date:
-                            ws.delete_rows(i + 3)
-                            st.success(f"{date} 일기 삭제 완료")
-                            st.session_state.student_entries = None
-                            st.rerun()
-                            break
-                except Exception as e:
-                    st.error(f"삭제 오류: {e}")
-        if st.button("메인 메뉴", use_container_width=True):
-            go_to("menu")
+                    with st.spinner("일기 저장 중..."):
+                        ws_s_submit_v6 = g_client_student_main_v6.open_by_url(st.session_state.student_sheet_url).sheet1
+                        all_records_at_submit_v6 = get_records_from_row2_header_s_app_v6(ws_s_submit_v6, EXPECTED_STUDENT_SHEET_HEADER)
+                        
+                        existing_idx_s_v6, note_today_s_v6 = -1, ""
+                        for idx_s_v6, r_s_submit_v6 in enumerate(all_records_at_submit_v6):
+                            if r_s_submit_v6.get("날짜") == today_submit_s_v6:
+                                existing_idx_s_v6, note_today_s_v6 = idx_s_v6, str(r_s_submit_v6.get("선생님 쪽지", "")); break
+                        
+                        new_data_s_v6 = [today_submit_s_v6, st.session_state.student_emotion,
+                                          st.session_state.student_gratitude, st.session_state.student_message, note_today_s_v6]
+                        
+                        if existing_idx_s_v6 != -1: 
+                            row_to_update_v6 = existing_idx_s_v6 + 3
+                            end_col_letter_upd_v6 = chr(ord('A') + len(EXPECTED_STUDENT_SHEET_HEADER) - 1)
+                            range_to_update_s_v6 = f'A{row_to_update_v6}:{end_col_letter_upd_v6}{row_to_update_v6}'
+                            ws_s_submit_v6.update(range_to_update_s_v6, [new_data_s_v6], value_input_option='USER_ENTERED')
+                            st.success("🔄 일기 수정 완료!")
+                        else: 
+                            ws_s_submit_v6.append_row(new_data_s_v6, value_input_option='USER_ENTERED')
+                            st.success("🌟 일기 저장 완료!")
+                        
+                        st.session_state.student_all_entries_cache = None 
+                        for k_form_s_v6 in ["student_emotion", "student_gratitude", "student_message"]: st.session_state[k_form_s_v6] = default_session_states_s_app_v6[k_form_s_v6]
+                        st.session_state.student_selected_diary_date = today_submit_s_v6
+                        st.session_state.student_navigation_history = [] 
+                        st.balloons()
+                        student_go_to_page_nav_v6("view_modify_diary", notes_check_outcome=None, student_new_notes_to_display=[])
+                except Exception as e_s_v6: st.error(f"일기 저장 오류: {e_s_v6}")
+
+    elif st.session_state.student_page == "view_modify_diary":
+        st.title("📖 지난 일기 보기/삭제"); st.divider()
+        if df_student_entries_main_v6.empty: st.info("작성된 일기가 없습니다.")
+        else:
+            dates_s_view_v6 = sorted(list(set(df_student_entries_main_v6["날짜"].dropna())), reverse=True)
+            if not dates_s_view_v6: st.info("작성된 일기가 없습니다.")
+            else:
+                def_date_s_view_v6 = st.session_state.get("student_selected_diary_date")
+                if not def_date_s_view_v6 or def_date_s_view_v6 not in dates_s_view_v6: def_date_s_view_v6 = dates_s_view_v6[0]
+                
+                sel_date_idx_v6 = dates_s_view_v6.index(def_date_s_view_v6) if def_date_s_view_v6 in dates_s_view_v6 else 0
+                sel_date_s_v6 = st.selectbox("날짜 선택:", options=dates_s_view_v6, index=sel_date_idx_v6, key="s_diary_sel_vfinal_6")
+                st.session_state.student_selected_diary_date = sel_date_s_v6
+
+                diary_s_v6 = df_student_entries_main_v6[df_student_entries_main_v6["날짜"] == sel_date_s_v6]
+                if not diary_s_v6.empty:
+                    r_s_view_v6 = diary_s_v6.iloc[0]
+                    st.subheader(f"🗓️ {sel_date_s_v6} 일기")
+                    st.write(f"**감정:** {r_s_view_v6.get('감정', '')}")
+                    st.write(f"**감사한 일:** {r_s_view_v6.get('감사한 일', '')}")
+                    st.write(f"**하고 싶은 말:** {r_s_view_v6.get('하고 싶은 말', '')}")
+                    st.write(f"**선생님 쪽지:** {str(r_s_view_v6.get('선생님 쪽지', ''))}")
+
+                    if st.button(f"❌ {sel_date_s_v6} 일기 삭제", key="s_delete_btn_vfinal_6", type="warning"):
+                        try:
+                            with st.spinner("일기 삭제 중..."):
+                                ws_s_del_v6 = g_client_student_main_v6.open_by_url(st.session_state.student_sheet_url).sheet1
+                                temp_recs_for_del_v6 = get_records_from_row2_header_s_app_v6(ws_s_del_v6, EXPECTED_STUDENT_SHEET_HEADER)
+                                row_to_del_idx_v6 = -1
+                                for idx_del_v6, r_del_v6 in enumerate(temp_recs_for_del_v6):
+                                    if r_del_v6.get("날짜") == sel_date_s_v6: row_to_del_idx_v6 = idx_del_v6 + 3; break
+                                
+                                if row_to_del_idx_v6 != -1:
+                                    ws_s_del_v6.delete_rows(row_to_del_idx_v6)
+                                    st.session_state.student_all_entries_cache = None 
+                                    st.success(f"✅ {sel_date_s_v6} 일기 삭제 완료.")
+                                    st.session_state.student_selected_diary_date = None; st.rerun()
+                                else: st.error("삭제할 일기를 시트에서 찾지 못했습니다.")
+                        except Exception as e_s_del_v6: st.error(f"일기 삭제 오류: {e_s_del_v6}")
+                else: st.info(f"{sel_date_s_v6}에 작성된 일기가 없습니다.")
+        
+        s_view_cols1_v6, s_view_cols2_v6 = st.columns(2)
+        with s_view_cols1_v6:
+            if st.button("메인 메뉴", use_container_width=True, key="s_view_to_menu_vfinal_6"): 
+                student_go_to_page_nav_v6("menu", notes_check_outcome=None, student_new_notes_to_display=[])
+        with s_view_cols2_v6:
+            if st.button("로그아웃", use_container_width=True, key="s_logout_view_vfinal_6"): student_logout_nav_v6()
+else: 
+    if st.session_state.student_page != "login": student_logout_nav_v6()
