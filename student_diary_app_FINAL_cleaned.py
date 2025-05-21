@@ -110,53 +110,45 @@ elif st.session_state.student_logged_in:
     if st.session_state.student_page == "check_notes":
         st.title(f"📬 {st.session_state.student_name}님, 선생님 쪽지 확인")
 
-        if not st.session_state.student_checked_notes_button_clicked:
-            if st.button("📬 선생님 쪽지 확인", use_container_width=True):
-                st.session_state.student_checked_notes_button_clicked = True
-                st.session_state.student_new_notes_to_display = []
-                try:
-                    ws = g_client.open_by_url(st.session_state.student_sheet_url).sheet1
-                    ensure_sheet_structure(ws, SETTINGS_ROW_DEFAULT, EXPECTED_STUDENT_SHEET_HEADER)
-                    all_vals = ws.get_all_values()
+        if st.button("📬 선생님 쪽지 확인", use_container_width=True):
+            try:
+                ws = g_client.open_by_url(st.session_state.student_sheet_url).sheet1
+                ensure_sheet_structure(ws, SETTINGS_ROW_DEFAULT, EXPECTED_STUDENT_SHEET_HEADER)
+                all_vals = ws.get_all_values()
 
-                    # B1에 있는 마지막 확인 날짜 확인
-                    last_checked_date = "2000-01-01"
+                # B1에 있는 마지막 확인 날짜 확인
+                last_checked_date = "2000-01-01"
+                try:
+                    b1_val = ws.cell(1, 2).value
+                    if b1_val:
+                        last_checked_date = b1_val.strip()
+                except:
+                    pass
+
+                new_notes = []
+                for row in reversed(all_vals[2:]):
+                    if len(row) >= 5 and row[4].strip():
+                        try:
+                            note_date = datetime.strptime(row[0], "%Y-%m-%d").date()
+                            if note_date > datetime.strptime(last_checked_date, "%Y-%m-%d").date():
+                                new_notes.append({"날짜": row[0], "쪽지": row[4].strip()})
+                        except:
+                            continue
+
+                if new_notes:
+                    new_notes = sorted(new_notes, key=lambda x: x["날짜"])
+                    st.success(f"새로운 쪽지가 {len(new_notes)}개 도착했어요!")
+                    for note in new_notes:
+                        st.markdown(f"**{note['날짜']}**: {note['쪽지']}")
                     try:
-                        b1_val = ws.cell(1, 2).value
-                        if b1_val:
-                            last_checked_date = b1_val.strip()
+                        ws.update_cell(1, 2, new_notes[-1]["날짜"])
                     except:
                         pass
+                else:
+                    st.info("새로운 선생님 쪽지가 없습니다.")
 
-                    new_notes = []
-                    for row in reversed(all_vals[2:]):
-                        if len(row) >= 5 and row[4].strip():
-                            try:
-                                note_date = datetime.strptime(row[0], "%Y-%m-%d").date()
-                                if note_date > datetime.strptime(last_checked_date, "%Y-%m-%d").date():
-                                    new_notes.append({"날짜": row[0], "쪽지": row[4].strip()})
-                            except:
-                                continue
-
-                    if new_notes:
-                        st.session_state.student_new_notes_to_display = sorted(new_notes, key=lambda x: x["날짜"])
-                        latest_date = st.session_state.student_new_notes_to_display[-1]["날짜"]
-                        try:
-                            ws.update_cell(1, 2, latest_date)
-                        except:
-                            pass
-                except Exception as e:
-                    st.error(f"쪽지 확인 오류: {e}")
-                    st.session_state.student_checked_notes_button_clicked = False
-
-        if st.session_state.student_checked_notes_button_clicked:
-            notes = st.session_state.student_new_notes_to_display
-            if notes:
-                st.success(f"새로운 쪽지가 {len(notes)}개 도착했어요!")
-                for note in notes:
-                    st.markdown(f"**{note['날짜']}**: {note['쪽지']}")
-            else:
-                st.info("새로운 선생님 쪽지가 없습니다.")
+            except Exception as e:
+                st.error(f"쪽지 확인 오류: {e}")
 
         st.divider()
         col1, col2 = st.columns(2)
